@@ -5,6 +5,8 @@ import com.fsck.k9.mail.MessagingException;
 import com.fsck.k9.mail.Part;
 
 import org.apache.commons.io.IOUtils;
+
+import okio.Buffer;
 import timber.log.Timber;
 
 import java.io.IOException;
@@ -122,6 +124,53 @@ public class CharsetSupport {
         /*
          * Convert and return as new String
          */
+        if(charset.equals("iso-2022-jp")){
+            int size = in.available();
+            byte[] buf = new byte[size];
+            int readsize = in.read(buf);
+            int bufsize = 0;
+            int shiftcount = 0;
+
+            for(int ct = 0; ct < readsize; ct++)
+            {
+                byte dt = buf[ct];
+
+                switch(dt){
+                    case 0x1b:
+                        if (shiftcount == 0 || shiftcount == 3)                        {
+                            shiftcount++;
+                        }
+                        break;
+                    case 0x28:
+                        if (shiftcount == 1)                        {
+                            shiftcount++;
+                        }
+                        break;
+                    case 0x24:
+                        if (shiftcount == 4)                        {
+                            shiftcount++;
+                        }
+                        break;
+                    case 0x42:
+                        if (shiftcount == 2 || shiftcount == 5)               {
+                            shiftcount++;
+                        }
+                        break;
+                    default:
+                        shiftcount = 0;
+                }
+
+                buf[bufsize] = dt;
+                bufsize++;
+
+                if (shiftcount == 6) {
+                    bufsize -= 6;
+                    shiftcount = 0;
+                }
+            }
+
+            in = new Buffer().write(buf,0,bufsize).inputStream();
+        }
         String str = IOUtils.toString(in, charset);
 
         if (isIphoneString)
