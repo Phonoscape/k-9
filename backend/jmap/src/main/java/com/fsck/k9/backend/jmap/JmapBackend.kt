@@ -30,7 +30,7 @@ class JmapBackend(
     private val commandDelete = CommandDelete(jmapClient, accountId)
     private val commandMove = CommandMove(jmapClient, accountId)
     private val commandUpload = CommandUpload(jmapClient, okHttpClient, httpAuthentication, accountId)
-    override val supportsSeenFlag = true
+    override val supportsFlags = true
     override val supportsExpunge = false
     override val supportsMove = true
     override val supportsCopy = true
@@ -99,11 +99,22 @@ class JmapBackend(
         return messageServerIds.associateWith { it }
     }
 
-    override fun search(folderServerId: String, query: String?, requiredFlags: Set<Flag>?, forbiddenFlags: Set<Flag>?): List<String> {
+    override fun search(
+        folderServerId: String,
+        query: String?,
+        requiredFlags: Set<Flag>?,
+        forbiddenFlags: Set<Flag>?,
+        performFullTextSearch: Boolean
+    ): List<String> {
         throw UnsupportedOperationException("not implemented")
     }
 
-    override fun fetchMessage(folderServerId: String, messageServerId: String, fetchProfile: FetchProfile): Message {
+    override fun fetchMessage(
+        folderServerId: String,
+        messageServerId: String,
+        fetchProfile: FetchProfile,
+        maxDownloadSize: Int
+    ): Message {
         throw UnsupportedOperationException("not implemented")
     }
 

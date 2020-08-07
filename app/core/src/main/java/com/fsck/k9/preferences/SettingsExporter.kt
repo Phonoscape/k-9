@@ -10,6 +10,8 @@ import com.fsck.k9.AccountPreferenceSerializer.Companion.IDENTITY_EMAIL_KEY
 import com.fsck.k9.AccountPreferenceSerializer.Companion.IDENTITY_NAME_KEY
 import com.fsck.k9.Preferences
 import com.fsck.k9.backend.BackendManager
+import com.fsck.k9.mailstore.FolderRepository
+import com.fsck.k9.mailstore.FolderRepositoryManager
 import com.fsck.k9.preferences.ServerTypeConverter.fromServerSettingsType
 import com.fsck.k9.preferences.Settings.InvalidSettingValueException
 import com.fsck.k9.preferences.Settings.SettingsDescription
@@ -22,7 +24,9 @@ import timber.log.Timber
 class SettingsExporter(
     private val contentResolver: ContentResolver,
     private val backendManager: BackendManager,
-    private val preferences: Preferences
+    private val preferences: Preferences,
+    private val folderSettingsProvider: FolderSettingsProvider,
+    private val folderRepositoryManager: FolderRepositoryManager
 ) {
     @Throws(SettingsImportExportException::class)
     fun exportToUri(includeGlobals: Boolean, accountUuids: Set<String>, uri: Uri) {
@@ -77,7 +81,7 @@ class SettingsExporter(
     }
 
     private fun writeSettings(serializer: XmlSerializer, prefs: Map<String, Any>) {
-        for ((key, versions) in GlobalSettings.SETTINGS) {
+        for ((key, versions) in GeneralSettingsDescriptions.SETTINGS) {
             val valueString = prefs[key] as String?
             val highestVersion = versions.lastKey()
             val setting = versions[highestVersion] ?: continue // Setting was removed
@@ -98,7 +102,6 @@ class SettingsExporter(
 
     private fun writeAccount(serializer: XmlSerializer, account: Account, prefs: Map<String, Any>) {
         val identities = mutableSetOf<Int>()
-        val folders = mutableSetOf<String>()
         val accountUuid = account.uuid
 
         serializer.startTag(null, ACCOUNT_ELEMENT)
@@ -204,30 +207,19 @@ class SettingsExporter(
                     continue
                 }
 
-                if (FolderSettings.SETTINGS.containsKey(thirdPart)) {
-                    // This is a folder key. Save folder name for later...
-                    folders.add(secondPart)
-                    // ... but don't write it now.
+                if (FolderSettingsDescriptions.SETTINGS.containsKey(thirdPart)) {
+                    // This is a folder key. Ignore it.
                     continue
                 }
             }
 
-            val versionedSetting = AccountSettings.SETTINGS[keyPart]
-            if (versionedSetting != null) {
-                val highestVersion = versionedSetting.lastKey()
-
-                val setting = versionedSetting[highestVersion]
-                if (setting != null) {
-                    // Only export account settings that can be found in AccountSettings.SETTINGS
-                    try {
-                        writeKeyAndPrettyValueFromSetting(serializer, keyPart, setting, valueString)
-                    } catch (e: InvalidSettingValueException) {
-                        Timber.w("Account setting \"%s\" (%s) has invalid value \"%s\" in preference storage. " +
-                            "This shouldn't happen!", keyPart, account.description, valueString)
-                    }
-                }
+            if (keyPart !in FOLDER_NAME_KEYS) {
+                writeAccountSettingIfValid(serializer, keyPart, valueString, account)
             }
         }
+
+        val folderRepository = folderRepositoryManager.getFolderRepository(account)
+        writeFolderNameSettings(account, folderRepository, serializer)
 
         serializer.endTag(null, SETTINGS_ELEMENT)
 
@@ -242,15 +234,64 @@ class SettingsExporter(
             serializer.endTag(null, IDENTITIES_ELEMENT)
         }
 
+        val folders = folderSettingsProvider.getFolderSettings(account)
         if (folders.isNotEmpty()) {
             serializer.startTag(null, FOLDERS_ELEMENT)
             for (folder in folders) {
-                writeFolder(serializer, accountUuid, folder, prefs)
+                writeFolder(serializer, folder)
             }
             serializer.endTag(null, FOLDERS_ELEMENT)
         }
 
         serializer.endTag(null, ACCOUNT_ELEMENT)
+    }
+
+    private fun writeAccountSettingIfValid(
+        serializer: XmlSerializer,
+        keyPart: String,
+        valueString: String,
+        account: Account
+    ) {
+        val versionedSetting = AccountSettingsDescriptions.SETTINGS[keyPart]
+        if (versionedSetting != null) {
+            val highestVersion = versionedSetting.lastKey()
+
+            val setting = versionedSetting[highestVersion]
+            if (setting != null) {
+                // Only export account settings that can be found in AccountSettings.SETTINGS
+                try {
+                    writeKeyAndPrettyValueFromSetting(serializer, keyPart, setting, valueString)
+                } catch (e: InvalidSettingValueException) {
+                    Timber.w(
+                        "Account setting \"%s\" (%s) has invalid value \"%s\" in preference storage. " +
+                            "This shouldn't happen!", keyPart, account.description, valueString
+                    )
+                }
+            }
+        }
+    }
+
+    private fun writeFolderNameSettings(
+        account: Account,
+        folderRepository: FolderRepository,
+        serializer: XmlSerializer
+    ) {
+        fun writeFolderNameSetting(key: String, folderId: Long?, importedFolderServerId: String?) {
+            val folderServerId = folderId?.let {
+                folderRepository.getFolderServerId(folderId)
+            } ?: importedFolderServerId
+
+            if (folderServerId != null) {
+                writeAccountSettingIfValid(serializer, key, folderServerId, account)
+            }
+        }
+
+        writeFolderNameSetting("autoExpandFolderName", account.autoExpandFolderId, account.importedAutoExpandFolder)
+        writeFolderNameSetting("archiveFolderName", account.archiveFolderId, account.importedArchiveFolder)
+        writeFolderNameSetting("draftsFolderName", account.draftsFolderId, account.importedDraftsFolder)
+        writeFolderNameSetting("sentFolderName", account.sentFolderId, account.importedSentFolder)
+        writeFolderNameSetting("spamFolderName", account.spamFolderId, account.importedSpamFolder)
+        writeFolderNameSetting("trashFolderName", account.trashFolderId, account.importedTrashFolder)
     }
 
     private fun writeIdentity(
@@ -303,7 +344,7 @@ class SettingsExporter(
                 continue
             }
 
-            val versionedSetting = IdentitySettings.SETTINGS[identityKey]
+            val versionedSetting = IdentitySettingsDescriptions.SETTINGS[identityKey]
             if (versionedSetting != null) {
                 val highestVersion = versionedSetting.lastKey()
                 val setting = versionedSetting[highestVersion]
@@ -324,46 +365,36 @@ class SettingsExporter(
         serializer.endTag(null, IDENTITY_ELEMENT)
     }
 
-    private fun writeFolder(serializer: XmlSerializer, accountUuid: String, folder: String, prefs: Map<String, Any>) {
+    private fun writeFolder(serializer: XmlSerializer, folder: FolderSettings) {
         serializer.startTag(null, FOLDER_ELEMENT)
-        serializer.attribute(null, NAME_ATTRIBUTE, folder)
+        serializer.attribute(null, NAME_ATTRIBUTE, folder.serverId)
 
         // Write folder settings
-        for ((key, value) in prefs) {
-            val valueString = value.toString()
+        writeFolderSetting(serializer, "integrate", folder.isIntegrate.toString())
+        writeFolderSetting(serializer, "inTopGroup", folder.isInTopGroup.toString())
+        writeFolderSetting(serializer, "syncMode", folder.syncClass.name)
+        writeFolderSetting(serializer, "displayMode", folder.displayClass.name)
+        writeFolderSetting(serializer, "notifyMode", folder.notifyClass.name)
+        writeFolderSetting(serializer, "pushMode", folder.pushClass.name)
 
-            val indexOfFirstDot = key.indexOf('.')
-            val indexOfLastDot = key.lastIndexOf('.')
-            if (indexOfFirstDot == -1 || indexOfLastDot == -1 || indexOfFirstDot == indexOfLastDot) {
-                // Skip non-folder config entries
-                continue
-            }
+        serializer.endTag(null, FOLDER_ELEMENT)
+    }
 
-            val keyUuid = key.substring(0, indexOfFirstDot)
-            val folderName = key.substring(indexOfFirstDot + 1, indexOfLastDot)
-            val folderKey = key.substring(indexOfLastDot + 1)
-            if (keyUuid != accountUuid || folderName != folder) {
-                // Skip entries that belong to another folder
-                continue
-            }
-
-            val versionedSetting = FolderSettings.SETTINGS[folderKey]
-            if (versionedSetting != null) {
-                val highestVersion = versionedSetting.lastKey()
-                val setting = versionedSetting[highestVersion]
-                if (setting != null) {
-                    // Only write settings that have an entry in FolderSettings.SETTINGS
-                    try {
-                        writeKeyAndPrettyValueFromSetting(serializer, folderKey, setting, valueString)
-                    } catch (e: InvalidSettingValueException) {
-                        Timber.w("Folder setting \"%s\" has invalid value \"%s\" in preference storage. " +
-                            "This shouldn't happen!", folderKey, valueString
-                        )
-                    }
+    private fun writeFolderSetting(serializer: XmlSerializer, key: String, value: String) {
+        val versionedSetting = FolderSettingsDescriptions.SETTINGS[key]
+        if (versionedSetting != null) {
+            val highestVersion = versionedSetting.lastKey()
+            val setting = versionedSetting[highestVersion]
+            if (setting != null) {
+                // Only write settings that have an entry in FolderSettings.SETTINGS
+                try {
+                    writeKeyAndPrettyValueFromSetting(serializer, key, setting, value)
+                } catch (e: InvalidSettingValueException) {
+                    Timber.w("Folder setting \"%s\" has invalid value \"%s\" in preference storage. " +
+                        "This shouldn't happen!", key, value)
                 }
             }
         }
-        serializer.endTag(null, FOLDER_ELEMENT)
     }
 
     private fun writeElement(serializer: XmlSerializer, elementName: String, value: String?) {
@@ -452,5 +483,14 @@ class SettingsExporter(
         const val NAME_ELEMENT = "name"
         const val EMAIL_ELEMENT = "email"
         const val DESCRIPTION_ELEMENT = "description"
+
+        private val FOLDER_NAME_KEYS = setOf(
+            "autoExpandFolderName",
+            "archiveFolderName",
+            "draftsFolderName",
+            "sentFolderName",
+            "spamFolderName",
+            "trashFolderName"
+        )
     }
 }
